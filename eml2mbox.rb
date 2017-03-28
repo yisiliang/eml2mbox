@@ -32,9 +32,12 @@
 # script; if not, please visit http://www.gnu.org/copyleft/gpl.html for more information.    #
 #============================================================================================#
 
-require "parsedate"
-
-include ParseDate
+# require "parsedate"
+require "date"
+require "time"
+require "rubygems"
+require 'rchardet'
+# include ParseDate
 
 #=======================================================#
 # Class that encapsulates the processing file in memory #
@@ -61,6 +64,13 @@ class FileInMemory
 
     def addLine(line)
         # If the line is a 'false' From line, add a '>' to its beggining
+        encoding = CharDet.detect(line)['encoding']
+        if encoding != nil and encoding.downcase != 'ascii' and encoding.downcase != "utf-8"
+            puts encoding
+            ec = Encoding::Converter.new(encoding, "UTF-8", :universal_newline => true)
+            puts "[" + line + "] encoding in " + encoding + ", convert to UTF-8 " + (ec.convert line)
+            line = ec.convert line
+        end
         line = line.sub(/From/, '>From') if line =~ /^From/ and @from!=nil
 
         # If the line is the first valid From line, save it (without the line break)
@@ -78,12 +88,11 @@ class FileInMemory
             if line =~ /^Date:\s/ and @date==nil
                 # Parse content of the Date header and convert to the mbox standard for the From_ line
                 @date = line.sub(/Date:\s/,'')
-                year, month, day, hour, minute, second, timezone, wday = parsedate(@date)
+                time = Time.parse(@date)
                 # Need to convert the timezone from a string to a 4 digit offset
-                unless timezone =~ /[+|-]\d*/
-                    timezone=ZoneOffset[timezone]
+                unless time.zone =~ /[+|-]\d*/
+                    timezone=ZoneOffset[time.zone]
                 end
-                time = Time.gm(year,month,day,hour,minute,second)
                 @date = formMboxDate(time,timezone)
             end
         end
@@ -253,7 +262,9 @@ end
         files.each() do |x|
             puts "Processing file: "+x
             thisFile = FileInMemory.new()
-            File.open(x).each  {|item| thisFile.addLine(item) }
+            File.open(x).each do |item|
+                thisFile.addLine(item)
+            end
             lines = thisFile.getProcessedLines
             if lines == nil
                 puts "WARN: File ["+x+"] doesn't seem to have a regular From: line. Not included in mbox"
