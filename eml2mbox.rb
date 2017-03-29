@@ -37,6 +37,8 @@ require "date"
 require "time"
 require "rubygems"
 require 'rchardet'
+require 'fileutils'
+require 'bindata'
 # include ParseDate
 
 #=======================================================#
@@ -44,16 +46,6 @@ require 'rchardet'
 #=======================================================#
 
 class FileInMemory
-    
-    ZoneOffset = {
-        # Standard zones by RFC 2822
-        'UTC' => '0000', 
-        'UT' => '0000', 'GMT' => '0000',
-        'EST' => '-0500', 'EDT' => '-0400',
-        'CST' => '-0600', 'CDT' => '-0500',
-        'MST' => '-0700', 'MDT' => '-0600',
-        'PST' => '-0800', 'PDT' => '-0700',
-    }   
     
     def initialize()
         @lines = Array.new
@@ -67,10 +59,11 @@ class FileInMemory
         encoding = CharDet.detect(line)['encoding']
         if encoding != nil and encoding.downcase != 'ascii' and encoding.downcase != "utf-8"
             puts encoding
-            ec = Encoding::Converter.new(encoding, "UTF-8", :universal_newline => true)
+            ec = Encoding::Converter.new(encoding, "UTF-8")
             puts "[" + line + "] encoding in " + encoding + ", convert to UTF-8 " + (ec.convert line)
             line = ec.convert line
         end
+        line = line.encode(line.encoding, :universal_newline => true).encode(line.encoding, :crlf_newline => false)
         line = line.sub(/From/, '>From') if line =~ /^From/ and @from!=nil
 
         # If the line is the first valid From line, save it (without the line break)
@@ -90,10 +83,7 @@ class FileInMemory
                 @date = line.sub(/Date:\s/,'')
                 time = Time.parse(@date)
                 # Need to convert the timezone from a string to a 4 digit offset
-                unless time.zone =~ /[+|-]\d*/
-                    timezone=ZoneOffset[time.zone]
-                end
-                @date = formMboxDate(time,timezone)
+                @date = formMboxDate(time)
             end
         end
 
@@ -110,12 +100,12 @@ class FileInMemory
             # Add from and date to the first line
             if @date==nil
                 puts "WARN: Failed to extract date. Will use current time in the From_ line"
-                @date=formMboxDate(Time.now,nil)
+                @date=formMboxDate(Time.now)
             end
             @lines[0] = @from + " " + @date 
             
             @lines[0] = fixLineEndings(@lines[0])
-            @lines[@counter] = ""
+            #@lines[@counter] = ""
             return @lines
         end
         # else don't return anything
@@ -123,25 +113,27 @@ class FileInMemory
 
     # Fixes CR/LFs
     def fixLineEndings(line)
-        line = removeCR(line) if $switches["removeCRs"];
-        line = removeLF(line) if $switches["removeLFs"];
+        line = removeCRLF(line)
         return line
     end
 
     # emls usually have CR+LF (DOS) line endings, Unix uses LF as a line break,
     # so there's a hanging CR at the end of the line when viewed on Unix.
     # This method will remove the next to the last character from a line
-    def removeCR(line)
-        line = line[0..-3]+line[-1..-1] if line[-2]==0xD
+    def removeCRLF(line)
+        if line[-1] == 0xA
+            puts line
+            line = line[0..-2]
+            puts line
+        end
+        if line[-1] == 0xD
+            puts line
+            line = line[0..-2]
+            puts line
+        end
         return line
     end
 
-    # Similar to the above. This one is for Macs that use CR as a line break.
-    # So, remove the last char
-    def removeLF(line)
-        line = line[0..-2] if line[-1]==0xA
-        return line
-    end
 
 end
 
@@ -165,16 +157,8 @@ end
 # If timezone is unknown, it is skipped.
 # mbox date format used is described here:
 # http://www.broobles.com/eml2mbox/mbox.html
-def formMboxDate(time,timezone)
-    if timezone==nil
-        return time.strftime("%a %b %d %H:%M:%S %Y")
-    else
-        if $switches["zoneYearOrder"]
-            return time.strftime("%a %b %d %H:%M:%S "+timezone.to_s+" %Y")
-        else 
-            return time.strftime("%a %b %d %H:%M:%S %Y "+timezone.to_s)
-        end
-    end
+def formMboxDate(time)
+    return time.strftime("%a %b %d %H:%M:%S %Y")
 end
 
 
@@ -185,13 +169,7 @@ def extractSwitches()
     switches = Hash.new(false)  # All switches (values) default to false
     i=0
     while (ARGV[i]=~ /^-/)  # while arguments are switches
-        if ARGV[i]=="-c"
-            switches["removeCRs"] = true
-            puts "\nWill fix lines ending with a CR"
-        elsif ARGV[i]=="-l"
-            switches["removeLFs"] = true
-            puts "\nWill fix lines beggining with a LF"
-        elsif ARGV[i]=="-s"
+        if ARGV[i]=="-s"
             switches["noStandardFromLine"] = true
             puts "\nWill use From and Date from mail headers in From_ line"
         elsif ARGV[i]=="-yz"
@@ -220,6 +198,8 @@ end
     mboxArchive = emlDir+"/archive.mbox"    # default if not specified
     mboxArchive = ARGV[1] if ARGV[1] != nil
 
+    
+
     # Show specified settings
     puts "\nSpecified dir : "+emlDir
     puts "Specified file: "+mboxArchive+"\n"
@@ -232,45 +212,73 @@ end
         exit(0)
     end
 
-    # Check if destination file exists. If yes allow user to select an option.
-    canceled = false
-    if FileTest.exist?(mboxArchive)
-        print "\nFile ["+mboxArchive+"] exists! Please select: [A]ppend  [O]verwrite  [C]ancel (default) "
-        sel = STDIN.gets.chomp
-        if sel == 'A' or sel == 'a'
-            aFile = File.new(mboxArchive, "a");
-        elsif sel == 'O' or sel == 'o'
-            aFile = File.new(mboxArchive, "w");
-        else
-            canceled = true
-        end
-    else
-        # File doesn't exist, open for writing
-        aFile = File.new(mboxArchive, "w");
+    if File.directory?(mboxArchive)
+        FileUtils.rm_r(mboxArchive)
     end
 
-    if not canceled
-        puts
-        files = Dir["*.eml"]
-        if files.size == 0
-            puts "No *.eml files in this directory. mbox file not created."
-            aFile.close
-            File.delete(mboxArchive)
-            exit(0)
-        end
-        # For each .eml file in the specified directory do the following
-        files.each() do |x|
-            puts "Processing file: "+x
-            thisFile = FileInMemory.new()
-            File.open(x).each do |item|
-                thisFile.addLine(item)
-            end
-            lines = thisFile.getProcessedLines
-            if lines == nil
-                puts "WARN: File ["+x+"] doesn't seem to have a regular From: line. Not included in mbox"
-            else
-                lines.each {|line| aFile.puts line}
-            end
-        end
-        aFile.close
+    if File.exists?(mboxArchive)
+        FileUtils.rm(mboxArchive)
     end
+
+    FileUtils.mkdir_p(mboxArchive)
+
+    # add table_of_contents file
+    sumArchive = mboxArchive+"/table_of_contents"
+
+    mboxArchive = mboxArchive+"/mbox"
+
+    aFile = File.open(mboxArchive, "w");
+    cFile = File.open(sumArchive, "w");
+
+    puts
+    files = Dir["*.eml"]
+    if files.size == 0
+        puts "No *.eml files in this directory. mbox file not created."
+        aFile.close
+        cFile.close
+        File.delete(mboxArchive)
+        File.delete(sumArchive)
+        exit(0)
+    end
+
+    #wirte header with 0 mail items
+    BinData::Int32be.new(900000).write(cFile)
+    #mail items
+    BinData::Int32be.new(0).write(cFile)
+    BinData::Int32be.new(Time.now.to_i).write(cFile)
+    BinData::Int32be.new(0).write(cFile)
+    BinData::Int32be.new(0).write(cFile)
+    BinData::Int32be.new(0).write(cFile)
+    BinData::Int32be.new(0).write(cFile)
+    BinData::Int32be.new(0).write(cFile)
+
+
+    mboxPosition = 0
+    mailItem = 0
+    # For each .eml file in the specified directory do the following
+    files.each() do |x|
+        puts "Processing file: "+x
+        thisFile = FileInMemory.new()
+        File.open(x).each do |item|
+            thisFile.addLine(item)
+        end
+        lines = thisFile.getProcessedLines
+        if lines == nil
+            puts "WARN: File ["+x+"] doesn't seem to have a regular From: line. Not included in mbox"
+        else
+            mailItem = mailItem + 1;
+            lastPosition = aFile.tell
+            lines.each {|line| aFile.puts line}
+            curPosition = aFile.tell
+            BinData::Int32be.new(12).write(cFile)
+            BinData::Int32be.new(lastPosition).write(cFile)
+            BinData::Int32be.new(curPosition - lastPosition).write(cFile)
+        end
+    end
+
+    BinData::Int32be.new(1118760731).write(cFile)
+
+    cFile.seek(4);
+    BinData::Int32be.new(mailItem).write(cFile)
+    aFile.close
+    cFile.close
